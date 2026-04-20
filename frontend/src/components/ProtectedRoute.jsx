@@ -1,10 +1,16 @@
-import { useContext } from 'react'
+import { useContext, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AuthContext } from '../context/AuthContext'
 
 export default function ProtectedRoute({ children }) {
   const { isAuthenticated, loading } = useContext(AuthContext)
   const navigate = useNavigate()
+
+  useEffect(() => {
+    if (!loading && !isAuthenticated) {
+      navigate('/login')
+    }
+  }, [isAuthenticated, loading, navigate])
 
   if (loading) {
     return (
@@ -15,7 +21,6 @@ export default function ProtectedRoute({ children }) {
   }
 
   if (!isAuthenticated) {
-    navigate('/login')
     return null
   }
 

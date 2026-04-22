@@ -1,120 +1,78 @@
 const express = require('express')
-const router = express.Router()
 const { authenticate, authorize } = require('../middleware/auth')
-const menuService = require('../services/menuService')
+const validateBody = require('../middleware/validateBody')
+const menuController = require('../controllers/menuController')
+const { } = require('../validation/schemas')
 
-// Get menus by branch
-router.get('/branch/:branchId', async (req, res) => {
-  try {
-    const menus = await menuService.getMenusByBranch(req.params.branchId)
-    res.json(menus)
-  } catch (error) {
-    res.status(500).json({ error: error.message })
-  }
-})
+const router = express.Router()
 
-// Get menu by ID
-router.get('/:id', async (req, res) => {
-  try {
-    const menu = await menuService.getMenuById(req.params.id)
-    res.json(menu)
-  } catch (error) {
-    res.status(404).json({ error: error.message })
-  }
-})
+// Menu operations
+/**
+ * GET /api/menus
+ * Get all menus in the user's branch
+ */
+router.get('/', authenticate, menuController.getMenusByBranch)
 
-// Create menu
-router.post('/', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    const { branchId, name, description } = req.body
-    const menu = await menuService.createMenu(branchId, { name, description })
-    res.status(201).json(menu)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * GET /api/menus/:menuId
+ * Get menu with all sections and items
+ */
+router.get('/:menuId', authenticate, menuController.getMenuById)
 
-// Update menu
-router.put('/:id', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    const menu = await menuService.updateMenu(req.params.id, req.body)
-    res.json(menu)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * POST /api/menus
+ * Create a new menu (manager only)
+ */
+router.post('/', authenticate, authorize('manager'), validateBody({}), menuController.createMenu)
 
-// Delete menu
-router.delete('/:id', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    await menuService.deleteMenu(req.params.id)
-    res.json({ message: 'Menu deleted' })
-  } catch (error) {
-    res.status(404).json({ error: error.message })
-  }
-})
+/**
+ * PATCH /api/menus/:menuId
+ * Update menu details
+ */
+router.patch('/:menuId', authenticate, authorize('manager'), validateBody({}), menuController.updateMenu)
 
-// Menu sections
-router.post('/sections', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    const { menuId, name, description, displayOrder } = req.body
-    const section = await menuService.createMenuSection(menuId, {
-      name,
-      description,
-      displayOrder
-    })
-    res.status(201).json(section)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * DELETE /api/menus/:menuId
+ * Delete a menu
+ */
+router.delete('/:menuId', authenticate, authorize('manager'), menuController.deleteMenu)
 
-// Menu items
-router.post('/items', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    const { menuSectionId, name, description, price, prepTime, ingredients, allergens } = req.body
-    const item = await menuService.createMenuItem(menuSectionId, {
-      name,
-      description,
-      price,
-      prepTime,
-      ingredients,
-      allergens
-    })
-    res.status(201).json(item)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+// MenuSection operations
+/**
+ * POST /api/menus/:menuId/sections
+ * Create menu section
+ */
+router.post('/:menuId/sections', authenticate, authorize('manager'), validateBody({}), menuController.createMenuSection)
 
-// Get menu item by ID
-router.get('/items/:id', async (req, res) => {
-  try {
-    const item = await menuService.getMenuItemById(req.params.id)
-    res.json(item)
-  } catch (error) {
-    res.status(404).json({ error: error.message })
-  }
-})
+/**
+ * PATCH /api/menus/sections/:sectionId
+ * Update menu section
+ */
+router.patch('/sections/:sectionId', authenticate, authorize('manager'), validateBody({}), menuController.updateMenuSection)
 
-// Update menu item
-router.put('/items/:id', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    const item = await menuService.updateMenuItem(req.params.id, req.body)
-    res.json(item)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * DELETE /api/menus/sections/:sectionId
+ * Delete menu section
+ */
+router.delete('/sections/:sectionId', authenticate, authorize('manager'), menuController.deleteMenuSection)
 
-// Delete menu item
-router.delete('/items/:id', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    await menuService.deleteMenuItem(req.params.id)
-    res.json({ message: 'MenuItem deleted' })
-  } catch (error) {
-    res.status(404).json({ error: error.message })
-  }
-})
+// MenuItem operations
+/**
+ * POST /api/menus/sections/:sectionId/items
+ * Create menu item
+ */
+router.post('/sections/:sectionId/items', authenticate, authorize('manager'), validateBody({}), menuController.createMenuItem)
+
+/**
+ * PATCH /api/menus/items/:itemId
+ * Update menu item
+ */
+router.patch('/items/:itemId', authenticate, authorize('manager'), validateBody({}), menuController.updateMenuItem)
+
+/**
+ * DELETE /api/menus/items/:itemId
+ * Delete menu item
+ */
+router.delete('/items/:itemId', authenticate, authorize('manager'), menuController.deleteMenuItem)
 
 module.exports = router

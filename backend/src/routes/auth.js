@@ -1,76 +1,59 @@
 const express = require('express')
-const router = express.Router()
-const { body, validationResult } = require('express-validator')
-const authService = require('../services/authService')
 const { authenticate } = require('../middleware/auth')
+const validateBody = require('../middleware/validateBody')
+const authController = require('../controllers/authController')
+const {
+  registerSchema,
+  loginSchema,
+  changePasswordSchema,
+} = require('../validation/schemas')
 
-// Validation middleware
-const validateRegister = [
-  body('email').isEmail().normalizeEmail(),
-  body('password').isLength({ min: 6 }),
-  body('firstName').notEmpty(),
-  body('lastName').notEmpty()
-]
+const router = express.Router()
 
-const validateLogin = [
-  body('email').isEmail().normalizeEmail(),
-  body('password').notEmpty()
-]
+/**
+ * POST /api/auth/register
+ * Register new account
+ */
+router.post('/register', validateBody(registerSchema), authController.register)
 
-// Error handler for validation
-const handleValidationErrors = (req, res, next) => {
-  const errors = validationResult(req)
-  if (!errors.isEmpty()) {
-    return res.status(400).json({ errors: errors.array() })
-  }
-  next()
-}
+/**
+ * POST /api/auth/login
+ * Login and get access + refresh tokens
+ */
+router.post('/login', validateBody(loginSchema), authController.login)
 
-// Register
-router.post('/register', validateRegister, handleValidationErrors, async (req, res) => {
-  try {
-    const user = await authService.register(req.body)
-    res.status(201).json({ user })
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * POST /api/auth/refresh
+ * Refresh access token using refresh token from cookie
+ */
+router.post('/refresh', authController.refresh)
 
-// Login
-router.post('/login', validateLogin, handleValidationErrors, async (req, res) => {
-  try {
-    const { email, password } = req.body
-    const { token, user } = await authService.login(email, password)
-    res.json({ token, user })
-  } catch (error) {
-    res.status(401).json({ error: error.message })
-  }
-})
+/**
+ * POST /api/auth/logout
+ * Logout and invalidate refresh tokens
+ */
+router.post('/logout', authenticate, authController.logout)
 
-// Get current user
-router.get('/me', authenticate, async (req, res) => {
-  try {
-    const user = await authService.getAccountById(req.user.id)
-    res.json(user)
-  } catch (error) {
-    res.status(404).json({ error: error.message })
-  }
-})
+/**
+ * POST /api/auth/change-password
+ * Change password (forces re-login)
+ */
+router.post(
+  '/change-password',
+  authenticate,
+  validateBody(changePasswordSchema),
+  authController.changePassword
+)
 
-// Update profile
-router.put('/profile', authenticate, async (req, res) => {
-  try {
-    const { firstName, lastName, phone } = req.body
-    const user = await authService.updateAccount(req.user.id, {
-      firstName,
-      lastName,
-      phone
-    })
-    res.json(user)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * GET /api/auth/me
+ * Get current authenticated user
+ */
+router.get('/me', authenticate, authController.getCurrentUser)
+
+module.exports = router
+
+
 
 // Change password
 router.post('/change-password', authenticate, async (req, res) => {

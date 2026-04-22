@@ -1,87 +1,187 @@
-const { Account } = require('../models')
-const { hashPassword, comparePassword } = require('../utils/passwordUtils')
-const { generateToken } = require('../utils/tokenUtils')
+const bcrypt = require('bcrypt')
+const AccountRepository = require('../repositories/AccountRepository')
+const {
+  AuthError,
+  TokenError,
+  ConflictError,
+  ValidationError,
+} = require('../utils/errors')
+const { generateTokenPair } = require('../utils/tokenUtils')
 
+/**
+ * AuthService - Handles authentication, token generation, and refresh rotation
+ */
 class AuthService {
-  async register(data) {
-    const { email, password, firstName, lastName, phone, role } = data
+  constructor() {
+    this.accountRepo = new AccountRepository()
+  }
 
-    // Check if account already exists
-    const existingAccount = await Account.findOne({ where: { email } })
-    if (existingAccount) {
-      throw new Error('Email already registered')
+  /**
+   * Register new account
+   */
+  async register(email, password, firstName, lastName, phone = null) {
+    // Validate input
+    if (!email || !password || !firstName || !lastName) {
+      throw new ValidationError('Missing required fields')
+    }
+
+    if (password.length < 8) {
+      throw new ValidationError('Password must be at least 8 characters')
+    }
+
+    // Check email doesn't exist
+    const existing = await this.accountRepo.findByEmail(email)
+    if (existing) {
+      throw new ConflictError('Email already registered')
     }
 
     // Hash password
-    const hashedPassword = await hashPassword(password)
+    const hashedPassword = await bcrypt.hash(password, 12)
 
     // Create account
-    const account = await Account.create({
-      email,
+    const account = await this.accountRepo.create({
+      email: email.toLowerCase(),
       password: hashedPassword,
       firstName,
       lastName,
       phone,
-      role: role || 'guest'
-    })
-
-    return this.formatAccount(account)
-  }
-
-  async login(email, password) {
-    const account = await Account.findOne({ where: { email } })
-
-    if (!account) {
-      throw new Error('Invalid credentials')
-    }
-
-    const isPasswordValid = await comparePassword(password, account.password)
-    if (!isPasswordValid) {
-      throw new Error('Invalid credentials')
-    }
-
-    // Update last login
-    await account.update({ lastLogin: new Date() })
-
-    // Generate token
-    const token = generateToken({
-      id: account.id,
-      email: account.email,
-      role: account.role
+      isActive: true,
+      tokenVersion: 0,
     })
 
     return {
-      token,
-      user: this.formatAccount(account)
+      id: account.id,
+      email: account.email,
+      firstName: account.firstName,
+      lastName: account.lastName,
     }
   }
 
-  async getAccountById(id) {
-    const account = await Account.findByPk(id)
+  /**
+   * Login and generate token pair
+   */
+  async login(email, password) {
+    if (!email || !password) {
+      throw new AuthError('Email and password required')
+    }
+
+    // Find account
+    const account = await this.accountRepo.findByEmail(email)
     if (!account) {
-      throw new Error('Account not found')
+      throw new AuthError('Invalid email or password')
     }
-    return this.formatAccount(account)
+
+    if (!account.isActive) {
+      throw new AuthError('Account is inactive')
+    }
+
+    // Verify password
+    const passwordValid = await bcrypt.compare(password, account.password)
+    if (!passwordValid) {
+      throw new AuthError('Invalid email or password')
+    }
+
+    // Update last login
+    await this.accountRepo.updateLastLogin(account.id)
+
+    // Generate tokens
+    const role = account.Staff?.role || 'guest'
+    const branchId = account.Staff?.branch_id || null
+
+    const tokens = generateTokenPair(account.id, role, branchId, account.tokenVersion)
+
+    return {
+      user: {
+        id: account.id,
+        email: account.email,
+        firstName: account.firstName,
+        lastName: account.lastName,
+        role,
+        branchId,
+        isStaff: !!account.Staff,
+      },
+      tokens,
+    }
   }
 
-  async updateAccount(id, data) {
-    const account = await Account.findByPk(id)
+  /**
+   * Refresh access token using refresh token
+   * Rotates refresh token by incrementing tokenVersion
+   */
+  async refresh(accountId, currentTokenVersion) {
+    const account = await this.accountRepo.findWithStaff(accountId)
     if (!account) {
-      throw new Error('Account not found')
+      throw new AuthError('Account not found')
     }
 
-    // Hash password if provided
-    if (data.password) {
-      data.password = await hashPassword(data.password)
+    if (!account.isActive) {
+      throw new AuthError('Account is inactive')
     }
 
-    await account.update(data)
-    return this.formatAccount(account)
+    // Check tokenVersion hasn't changed (no logout/password change)
+    if (account.tokenVersion !== currentTokenVersion) {
+      throw new TokenError('Token has been invalidated')
+    }
+
+    const role = account.Staff?.role || 'guest'
+    const branchId = account.Staff?.branch_id || null
+
+    // Generate new token pair (includes old tokenVersion)
+    const tokens = generateTokenPair(account.id, role, branchId, account.tokenVersion)
+
+    return {
+      user: {
+        id: account.id,
+        email: account.email,
+        firstName: account.firstName,
+        lastName: account.lastName,
+        role,
+        branchId,
+        isStaff: !!account.Staff,
+      },
+      tokens,
+    }
   }
 
-  formatAccount(account) {
-    const { password, ...accountData } = account.toJSON()
-    return accountData
+  /**
+   * Logout - increment tokenVersion to invalidate all refresh tokens
+   */
+  async logout(accountId) {
+    await this.accountRepo.incrementTokenVersion(accountId)
+    return { message: 'Logged out successfully' }
+  }
+
+  /**
+   * Change password - increments tokenVersion to force re-login
+   */
+  async changePassword(accountId, oldPassword, newPassword) {
+    if (!oldPassword || !newPassword) {
+      throw new ValidationError('Old and new passwords required')
+    }
+
+    if (newPassword.length < 8) {
+      throw new ValidationError('New password must be at least 8 characters')
+    }
+
+    const account = await this.accountRepo.findById(accountId)
+    if (!account) {
+      throw new AuthError('Account not found')
+    }
+
+    // Verify old password
+    const passwordValid = await bcrypt.compare(oldPassword, account.password)
+    if (!passwordValid) {
+      throw new AuthError('Current password is incorrect')
+    }
+
+    // Hash and save new password
+    const hashedPassword = await bcrypt.hash(newPassword, 12)
+    await this.accountRepo.updateById(accountId, { password: hashedPassword })
+
+    // Increment tokenVersion to force all clients to re-authenticate
+    await this.accountRepo.incrementTokenVersion(accountId)
+
+    return { message: 'Password changed successfully' }
   }
 }
 

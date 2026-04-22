@@ -2,42 +2,60 @@ const { DataTypes } = require('sequelize')
 const sequelize = require('../config/database')
 const { v4: uuidv4 } = require('uuid')
 
-const Account = sequelize.define('Account', {
-  id: {
-    type: DataTypes.UUID,
-    defaultValue: () => uuidv4(),
-    primaryKey: true
+const Account = sequelize.define(
+  'Account',
+  {
+    id: {
+      type: DataTypes.UUID,
+      defaultValue: () => uuidv4(),
+      primaryKey: true,
+    },
+    email: {
+      type: DataTypes.STRING,
+      allowNull: false,
+      unique: true,
+      lowercase: true,
+      trim: true,
+    },
+    password: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+    firstName: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+    lastName: {
+      type: DataTypes.STRING,
+      allowNull: false,
+    },
+    phone: {
+      type: DataTypes.STRING,
+      allowNull: true,
+    },
+    isActive: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: true,
+    },
+    lastLogin: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+    tokenVersion: {
+      type: DataTypes.INTEGER,
+      defaultValue: 0,
+      comment: 'Incremented on logout/password change to invalidate all refresh tokens',
+    },
   },
-  email: {
-    type: DataTypes.STRING,
-    allowNull: false,
-    unique: true,
-    validate: {
-      isEmail: true
-    }
-  },
-  password: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  firstName: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  lastName: {
-    type: DataTypes.STRING,
-    allowNull: false
-  },
-  phone: {
-    type: DataTypes.STRING,
-    allowNull: true
-  },
-  role: {
-    type: DataTypes.ENUM('waiter', 'chef', 'receptionist', 'manager', 'guest'),
-    allowNull: false,
-    defaultValue: 'guest'
-  },
-  isActive: {
+  {
+    tableName: 'accounts',
+    timestamps: true,
+    underscored: true,
+  }
+)
+
+module.exports = Account
+
     type: DataTypes.BOOLEAN,
     defaultValue: true
   },
@@ -59,3 +77,4 @@ const Account = sequelize.define('Account', {
 })
 
 module.exports = Account
+

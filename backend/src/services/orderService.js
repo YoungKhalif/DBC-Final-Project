@@ -1,145 +1,215 @@
-const { Order, OrderItem, MenuItem, Bill, Table } = require('../models')
-const { Op } = require('sequelize')
+const { v4: uuidv4 } = require('uuid');
+const OrderRepository = require('../repositories/OrderRepository');
+const { Order, Meal, MealItem, MenuItem, Table } = require('../models');
+const { Op } = require('sequelize');
+const {
+  StateTransitionError,
+  NotFoundError,
+  ValidationError,
+} = require('../utils/errors');
+const eventBus = require('../events/EventBus');
 
+/**
+ * OrderService - State machine for order lifecycle
+ */
 class OrderService {
-  async createOrder(tableId, waiterId, items) {
-    // Create order
-    const order = await Order.create({
-      tableId,
-      waiterId,
-      status: 'pending',
-      totalAmount: 0
-    })
+  constructor() {
+    this.orderRepo = new OrderRepository();
+    this.validTransitions = {
+      draft: ['submitted', 'cancelled'],
+      submitted: ['in_kitchen', 'cancelled'],
+      in_kitchen: ['ready'],
+      ready: ['served'],
+      served: ['closed'],
+      closed: [],
+      cancelled: [],
+    };
+    this.mealItemTransitions = {
+      pending: ['preparing'],
+      preparing: ['ready'],
+      ready: ['served'],
+      served: [],
+    };
+  }
 
-    // Add items to order
-    let totalAmount = 0
-    for (const item of items) {
-      const menuItem = await MenuItem.findByPk(item.menuItemId)
-      if (!menuItem) {
-        throw new Error(`MenuItem ${item.menuItemId} not found`)
+  /**
+   * Create order in draft state
+   */
+  async createOrder(tableId, waiterId, meals) {
+    if (!meals || meals.length === 0) {
+      throw new ValidationError('At least one meal required');
+    }
+
+    for (const meal of meals) {
+      for (const item of meal.items) {
+        const menuItem = await MenuItem.findByPk(item.menu_item_id);
+        if (!menuItem || !menuItem.is_available) {
+          throw new ValidationError(`Menu item ${item.menu_item_id} not available`);
+        }
+      }
+    }
+
+    const sequelize = Order.sequelize;
+    const transaction = await sequelize.transaction();
+
+    try {
+      const order = await Order.create(
+        {
+          table_id: tableId,
+          waiter_id: waiterId,
+          status: 'draft',
+          placed_at: null,
+        },
+        { transaction }
+      );
+
+      for (const mealData of meals) {
+        const meal = await Meal.create(
+          {
+            order_id: order.id,
+            course_number: mealData.course_number,
+          },
+          { transaction }
+        );
+
+        for (const itemData of mealData.items) {
+          const menuItem = await MenuItem.findByPk(itemData.menu_item_id);
+          await MealItem.create(
+            {
+              meal_id: meal.id,
+              menu_item_id: menuItem.id,
+              quantity: itemData.quantity,
+              unit_price: menuItem.price,
+              special_instructions: itemData.special_instructions || null,
+              status: 'pending',
+            },
+            { transaction }
+          );
+        }
       }
 
-      const subtotal = parseFloat(menuItem.price) * item.quantity
-      totalAmount += subtotal
-
-      await OrderItem.create({
-        orderId: order.id,
-        menuItemId: item.menuItemId,
-        quantity: item.quantity,
-        unitPrice: menuItem.price,
-        subtotal,
-        specialRequests: item.specialRequests || null
-      })
+      await transaction.commit();
+      return this.orderRepo.findWithDetails(order.id);
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
     }
-
-    // Update order total
-    await order.update({ totalAmount })
-
-    return this.getOrderById(order.id)
   }
 
-  async getOrderById(id) {
-    const order = await Order.findByPk(id, {
-      include: [
-        {
-          model: OrderItem,
-          include: [MenuItem]
-        },
-        { model: Table, as: 'table' },
-        { model: require('../models').Account, as: 'waiter' }
-      ]
-    })
+  async submitOrder(orderId) {
+    const order = await this.orderRepo.findWithDetails(orderId);
+    if (!order) throw new NotFoundError('Order');
 
-    if (!order) {
-      throw new Error('Order not found')
-    }
+    this.validateTransition(order.status, 'submitted');
 
-    return order
+    await this.orderRepo.updateById(orderId, {
+      status: 'submitted',
+      placed_at: new Date(),
+    });
+
+    eventBus.emitOrderStatusChanged(orderId, 'draft', 'submitted', order.table_id, order.waiter_id);
+    return this.orderRepo.findWithDetails(orderId);
   }
 
-  async getOrdersByTableId(tableId) {
-    const orders = await Order.findAll({
-      where: {
-        tableId,
-        status: { [Op.ne]: 'served' }
-      },
-      include: [
-        {
-          model: OrderItem,
-          include: [MenuItem]
-        }
-      ]
-    })
+  async updateOrderStatus(orderId, newStatus) {
+    const order = await this.orderRepo.findWithDetails(orderId);
+    if (!order) throw new NotFoundError('Order');
 
-    return orders
+    this.validateTransition(order.status, newStatus);
+
+    const oldStatus = order.status;
+    await this.orderRepo.updateById(orderId, { status: newStatus });
+
+    eventBus.emitOrderStatusChanged(orderId, oldStatus, newStatus, order.table_id, order.waiter_id);
+    return this.orderRepo.findWithDetails(orderId);
   }
 
-  async updateOrderStatus(id, status) {
-    const order = await Order.findByPk(id)
-    if (!order) {
-      throw new Error('Order not found')
+  async updateMealItemStatus(mealItemId, newStatus, userRole) {
+    const mealItem = await MealItem.findByPk(mealItemId, {
+      include: [{ association: 'meal', include: [{ association: 'order' }] }],
+    });
+
+    if (!mealItem) throw new NotFoundError('Meal item');
+
+    this.validateMealItemTransition(mealItem.status, newStatus);
+
+    if (userRole === 'chef' && !['pending', 'preparing', 'ready'].includes(newStatus)) {
+      throw new ValidationError('Chef can only set pending→preparing→ready');
     }
 
-    // Validate status transition
-    const validTransitions = {
-      pending: ['confirmed', 'cancelled'],
-      confirmed: ['preparing', 'cancelled'],
-      preparing: ['ready', 'cancelled'],
-      ready: ['served', 'cancelled'],
-      served: [],
-      cancelled: []
+    if (userRole === 'waiter' && newStatus !== 'served') {
+      throw new ValidationError('Waiter can only mark as served');
     }
 
-    if (!validTransitions[order.status]?.includes(status)) {
-      throw new Error(`Cannot transition from ${order.status} to ${status}`)
+    const oldStatus = mealItem.status;
+    await mealItem.update({ status: newStatus });
+
+    eventBus.emitMealItemStatusChanged(mealItemId, mealItem.meal.order_id, oldStatus, newStatus);
+
+    const meal = mealItem.meal;
+    const pendingItemsCount = await MealItem.count({
+      where: { meal_id: meal.id, status: { [Op.ne]: 'served' } },
+    });
+
+    if (pendingItemsCount === 0 && meal.order && meal.order.status === 'ready') {
+      await this.updateOrderStatus(meal.order.id, 'served');
     }
 
-    await order.update({ status })
-    return this.getOrderById(id)
+    return mealItem;
   }
 
-  async updateOrderItemStatus(orderItemId, status) {
-    const orderItem = await OrderItem.findByPk(orderItemId)
-    if (!orderItem) {
-      throw new Error('Order item not found')
+  async cancelOrder(orderId) {
+    const order = await this.orderRepo.findWithDetails(orderId);
+    if (!order) throw new NotFoundError('Order');
+
+    if (!['draft', 'submitted'].includes(order.status)) {
+      throw new StateTransitionError(order.status, 'cancelled', 'Can only cancel draft or submitted orders');
     }
 
-    const validTransitions = {
-      pending: ['confirmed', 'cancelled'],
-      confirmed: ['preparing', 'cancelled'],
-      preparing: ['ready', 'cancelled'],
-      ready: ['served', 'cancelled'],
-      served: [],
-      cancelled: []
-    }
-
-    if (!validTransitions[orderItem.status]?.includes(status)) {
-      throw new Error(`Cannot transition from ${orderItem.status} to ${status}`)
-    }
-
-    await orderItem.update({ status })
-    return orderItem
+    await this.orderRepo.updateById(orderId, { status: 'cancelled' });
+    eventBus.emitOrderStatusChanged(orderId, order.status, 'cancelled', order.table_id, order.waiter_id);
+    return this.orderRepo.findWithDetails(orderId);
   }
 
-  async getOrdersByStatus(status, branchId = null) {
-    const where = { status }
-    if (branchId) {
-      // Would need join logic for branch filtering
+  // --- Integrated Helper Methods ---
+
+  async getOrder(orderId) {
+    const order = await this.orderRepo.findWithDetails(orderId);
+    if (!order) throw new NotFoundError('Order');
+    return order;
+  }
+
+  async getTableOrders(tableId) {
+    return this.orderRepo.findByTable(tableId);
+  }
+
+  async getOrdersByStatus(status) {
+    return Order.findAll({
+      where: { status },
+      include: [{ model: Meal, include: [MealItem] }, { model: Table }]
+    });
+  }
+
+  // --- Validation Logic ---
+
+  validateTransition(from, to) {
+    if (!this.validTransitions[from]) {
+      throw new StateTransitionError(from, to, `Invalid current status: ${from}`);
     }
+    if (!this.validTransitions[from].includes(to)) {
+      throw new StateTransitionError(
+        from,
+        to,
+        `Cannot transition from ${from} to ${to}. Valid: ${this.validTransitions[from].join(', ')}`
+      );
+    }
+  }
 
-    const orders = await Order.findAll({
-      where,
-      include: [
-        {
-          model: OrderItem,
-          include: [MenuItem]
-        },
-        { model: Table }
-      ]
-    })
-
-    return orders
+  validateMealItemTransition(from, to) {
+    if (!this.mealItemTransitions[from] || !this.mealItemTransitions[from].includes(to)) {
+      throw new StateTransitionError(from, to, `Cannot transition meal item from ${from} to ${to}`);
+    }
   }
 }
 
-module.exports = new OrderService()
+module.exports = new OrderService();

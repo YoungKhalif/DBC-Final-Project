@@ -1,81 +1,124 @@
+const { TokenError, ForbiddenError, AuthError } = require('../utils/errors')
 const { verifyToken } = require('../utils/tokenUtils')
 const { Account, Staff } = require('../models')
 
 /**
- * Authentication middleware: validates JWT token
+ * Authentication middleware: validates JWT access token
+ * Verifies token signature, expiry, and tokenVersion match
  * Attaches user object to req.user
  */
 const authenticate = async (req, res, next) => {
   try {
-    const token = req.headers.authorization?.replace('Bearer ', '')
-
-    if (!token) {
-      return res.status(401).json({ error: 'No token provided' })
+    const authHeader = req.headers.authorization
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      throw new TokenError('Missing or invalid authorization header')
     }
 
+    const token = authHeader.substring(7)
     const decoded = verifyToken(token)
+
     if (!decoded) {
-      return res.status(401).json({ error: 'Invalid or expired token' })
+      throw new TokenError('Invalid or expired token')
     }
 
-    // Load full account with staff details if applicable
-    const account = await Account.findByPk(decoded.id, {
+    // Verify token type is 'access'
+    if (decoded.type !== 'access') {
+      throw new TokenError('Invalid token type')
+    }
+
+    // Load account and check tokenVersion matches (refresh token rotation)
+    const account = await Account.findByPk(decoded.sub, {
       include: [
         {
           model: Staff,
           required: false,
-          attributes: ['id', 'role', 'branch_id'],
+          attributes: ['id', 'role', 'branch_id', 'hireDate'],
         },
       ],
     })
 
-    if (!account || !account.isActive) {
-      return res.status(401).json({ error: 'Account not found or inactive' })
+    if (!account) {
+      throw new AuthError('Account not found')
     }
 
+    if (!account.isActive) {
+      throw new AuthError('Account is inactive')
+    }
+
+    // Check tokenVersion matches (if it changed, refresh tokens were rotated)
+    if (decoded.tokenVersion !== account.tokenVersion) {
+      throw new TokenError('Token has been invalidated')
+    }
+
+    // Attach user to request
     req.user = {
       id: account.id,
       email: account.email,
       firstName: account.firstName,
       lastName: account.lastName,
-      account_type: account.account_type,
-      staff: account.Staff || null,
+      role: account.Staff?.role || 'guest',
+      branchId: account.Staff?.branch_id || null,
+      isStaff: !!account.Staff,
     }
 
     next()
   } catch (error) {
-    return res.status(401).json({ error: 'Authentication failed' })
+    if (error instanceof TokenError || error instanceof AuthError) {
+      return next(error)
+    }
+    next(new TokenError('Authentication failed'))
   }
 }
 
 /**
  * Authorization middleware: checks user role
- * Usage: authorize(['manager', 'chef'])
- * Guests can be authorized with ['guest']
+ * Usage: authorize('manager', 'receptionist')
  */
-const authorize = (allowedRoles = []) => {
+const authorize = (...requiredRoles) => {
   return (req, res, next) => {
     if (!req.user) {
-      return res.status(401).json({ error: 'User not authenticated' })
+      return next(new AuthError('Authentication required'))
     }
 
-    // Guests have account_type='guest', no staff record
-    if (req.user.account_type === 'guest') {
-      if (!allowedRoles.includes('guest')) {
-        return res.status(403).json({ error: 'This action requires staff account' })
-      }
+    if (requiredRoles.length === 0) {
       return next()
     }
 
-    // Staff must have a role in the allowed list
-    if (!req.user.staff || allowedRoles.length === 0) {
-      return res.status(403).json({ error: 'Access denied' })
+    if (!requiredRoles.includes(req.user.role)) {
+      return next(
+        new ForbiddenError(
+          `Requires one of: ${requiredRoles.join(', ')}, your role: ${req.user.role}`
+        )
+      )
     }
 
-    if (!allowedRoles.includes(req.user.staff.role)) {
-      return res.status(403).json({
-        error: `This action requires one of: ${allowedRoles.join(', ')}`,
-      })
+    next()
+  }
+}
+
+/**
+ * Verify user is staff only (no guests)
+ */
+const requireStaff = (req, res, next) => {
+  if (!req.user?.isStaff) {
+    return next(new ForbiddenError('Staff account required'))
+  }
+  next()
+}
+
+/**
+ * Verify user owns this branch
+ */
+const requireBranch = (branchIdParam = 'branchId') => {
+  return (req, res, next) => {
+    const requiredBranchId = req.params[branchIdParam] || req.query.branchId
+
+    if (!req.user?.branchId) {
+      return next(new ForbiddenError('Staff access required'))
+    }
+
+    if (req.user.branchId !== requiredBranchId) {
+      return next(new ForbiddenError('Cannot access this branch'))
     }
 
     next()
@@ -85,4 +128,7 @@ const authorize = (allowedRoles = []) => {
 module.exports = {
   authenticate,
   authorize,
+  requireStaff,
+  requireBranch,
 }
+

@@ -1,69 +1,45 @@
 const express = require('express')
-const router = express.Router()
 const { authenticate, authorize } = require('../middleware/auth')
-const paymentService = require('../services/paymentService')
+const validateBody = require('../middleware/validateBody')
+const paymentController = require('../controllers/paymentController')
+const { processPaymentSchema } = require('../validation/schemas')
 
-// Generate bill
-router.post('/bills', authenticate, authorize(['waiter', 'manager']), async (req, res) => {
-  try {
-    const { orderId } = req.body
-    const bill = await paymentService.generateBill(orderId)
-    res.status(201).json(bill)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+const router = express.Router()
 
-// Get bill by ID
-router.get('/bills/:id', authenticate, async (req, res) => {
-  try {
-    const bill = await paymentService.getBillById(req.params.id)
-    res.json(bill)
-  } catch (error) {
-    res.status(404).json({ error: error.message })
-  }
-})
+/**
+ * POST /api/payments/bills/:orderId
+ * Generate a bill for an order
+ */
+router.post('/bills/:orderId', authenticate, authorize('waiter', 'manager'), paymentController.generateBill)
 
-// Get bills by status
-router.get('/bills/status/:status', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    const bills = await paymentService.getBillsByStatus(req.params.status)
-    res.json(bills)
-  } catch (error) {
-    res.status(500).json({ error: error.message })
-  }
-})
+/**
+ * GET /api/payments/bills/:billId
+ * Get bill details
+ */
+router.get('/bills/:billId', authenticate, paymentController.getBillById)
 
-// Process payment
-router.post('/bills/:id/pay', authenticate, async (req, res) => {
-  try {
-    const { paymentMethod } = req.body
-    const bill = await paymentService.processBill(req.params.id, paymentMethod)
-    res.json(bill)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * POST /api/payments/bills/:billId/pay
+ * Process payment for a bill
+ */
+router.post('/bills/:billId/pay', authenticate, validateBody(processPaymentSchema), paymentController.processBill)
 
-// Apply discount
-router.post('/bills/:id/discount', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    const { discountAmount } = req.body
-    const bill = await paymentService.applyDiscount(req.params.id, discountAmount)
-    res.json(bill)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * GET /api/payments/bills
+ * Get bills by status (pending, paid, cancelled)
+ */
+router.get('/bills', authenticate, authorize('manager'), paymentController.getBillsByStatus)
 
-// Cancel bill
-router.delete('/bills/:id', authenticate, authorize(['manager']), async (req, res) => {
-  try {
-    const bill = await paymentService.cancelBill(req.params.id)
-    res.json(bill)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * DELETE /api/payments/bills/:billId
+ * Cancel/void a bill
+ */
+router.delete('/bills/:billId', authenticate, authorize('manager'), paymentController.cancelBill)
+
+/**
+ * PATCH /api/payments/bills/:billId/discount
+ * Apply discount to a bill
+ */
+router.patch('/bills/:billId/discount', authenticate, authorize('manager'), validateBody({}), paymentController.applyDiscount)
 
 module.exports = router

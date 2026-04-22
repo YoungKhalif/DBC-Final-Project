@@ -1,96 +1,59 @@
 const express = require('express')
-const router = express.Router()
 const { authenticate, authorize } = require('../middleware/auth')
-const reservationService = require('../services/reservationService')
+const validateBody = require('../middleware/validateBody')
+const reservationController = require('../controllers/reservationController')
+const { createReservationSchema, updateReservationStatusSchema } = require('../validation/schemas')
 
-// Create reservation
-router.post('/', async (req, res) => {
-  try {
-    const reservation = await reservationService.createReservation(req.body)
-    res.status(201).json(reservation)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+const router = express.Router()
 
-// Get reservation by ID
-router.get('/:id', async (req, res) => {
-  try {
-    const reservation = await reservationService.getReservationById(req.params.id)
-    res.json(reservation)
-  } catch (error) {
-    res.status(404).json({ error: error.message })
-  }
-})
+/**
+ * POST /api/reservations
+ * Create a new reservation
+ */
+router.post('/', validateBody(createReservationSchema), reservationController.createReservation)
 
-// Get reservations by branch
-router.get('/branch/:branchId', authenticate, async (req, res) => {
-  try {
-    const { status, dateRange } = req.query
-    const reservations = await reservationService.getReservationsByBranch(
-      req.params.branchId,
-      { status, dateRange: dateRange ? JSON.parse(dateRange) : undefined }
-    )
-    res.json(reservations)
-  } catch (error) {
-    res.status(500).json({ error: error.message })
-  }
-})
+/**
+ * GET /api/reservations/:reservationId
+ * Get a specific reservation
+ */
+router.get('/:reservationId', authenticate, reservationController.getReservationById)
 
-// Update reservation
-router.put('/:id', authenticate, authorize(['receptionist', 'manager']), async (req, res) => {
-  try {
-    const reservation = await reservationService.updateReservation(req.params.id, req.body)
-    res.json(reservation)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * GET /api/reservations
+ * Get all reservations for the user's branch (with optional filters)
+ */
+router.get('/', authenticate, reservationController.getReservationsByBranch)
 
-// Update reservation status
-router.patch('/:id/status', authenticate, authorize(['receptionist', 'manager']), async (req, res) => {
-  try {
-    const { status } = req.body
-    const reservation = await reservationService.updateReservationStatus(req.params.id, status)
-    res.json(reservation)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * PATCH /api/reservations/:reservationId
+ * Update reservation details
+ */
+router.patch('/:reservationId', authenticate, authorize('receptionist', 'manager'), validateBody(createReservationSchema), reservationController.updateReservation)
 
-// Assign table to reservation
-router.post('/:id/assign-table', authenticate, authorize(['receptionist', 'manager']), async (req, res) => {
-  try {
-    const { tableId } = req.body
-    const reservation = await reservationService.assignTableToReservation(req.params.id, tableId)
-    res.json(reservation)
-  } catch (error) {
-    res.status(400).json({ error: error.message })
-  }
-})
+/**
+ * PATCH /api/reservations/:reservationId/status
+ * Update reservation status (pending → confirmed → checked-in → completed)
+ */
+router.patch('/:reservationId/status', authenticate, authorize('receptionist', 'manager'), validateBody(updateReservationStatusSchema), reservationController.updateReservationStatus)
 
-// Cancel reservation
-router.delete('/:id', authenticate, authorize(['receptionist', 'manager']), async (req, res) => {
-  try {
-    await reservationService.cancelReservation(req.params.id)
-    res.json({ message: 'Reservation cancelled' })
-  } catch (error) {
-    res.status(404).json({ error: error.message })
-  }
-})
+/**
+ * PATCH /api/reservations/:reservationId/assign-table
+ * Assign a table to a reservation (receptionist or manager)
+ */
+router.patch('/:reservationId/assign-table', authenticate, authorize('receptionist', 'manager'), validateBody({}), reservationController.assignTableToReservation)
 
-// Get upcoming reservations
-router.get('/branch/:branchId/upcoming', authenticate, async (req, res) => {
-  try {
-    const { hoursAhead } = req.query
-    const reservations = await reservationService.getUpcomingReservations(
-      req.params.branchId,
-      hoursAhead ? parseInt(hoursAhead) : 2
-    )
-    res.json(reservations)
-  } catch (error) {
-    res.status(500).json({ error: error.message })
-  }
-})
+/**
+ * POST /api/reservations/:reservationId/cancel
+ * Cancel a reservation
+ */
+router.post('/:reservationId/cancel', authenticate, authorize('receptionist', 'manager'), reservationController.cancelReservation)
+
+/**
+ * GET /api/reservations/upcoming
+ * Get upcoming reservations for the next N hours
+ */
+router.get('/upcoming', authenticate, reservationController.getUpcomingReservations)
+
+module.exports = router
 
 module.exports = router
